@@ -31,7 +31,9 @@ import {
   Hash,
   Upload,
   Download,
-  Copy
+  Copy,
+  Menu,
+  X
 } from 'lucide-react';
 
 const logos = [
@@ -75,8 +77,44 @@ const SectionHeader = ({ label, title, subtitle }: { label: string, title: strin
   </div>
 );
 
+const SidebarContent = ({ activeTab, setActiveTab, tabs, tabGroups }: { 
+  activeTab: string, 
+  setActiveTab: (id: string) => void, 
+  tabs: any[], 
+  tabGroups: any[] 
+}) => (
+  <nav className="flex-1 py-8 px-5 space-y-9 overflow-y-auto custom-scrollbar">
+    {tabGroups.map((group) => (
+      <div key={group.id} className="space-y-4">
+        <h3 className="px-4 text-[9px] font-bold tracking-[0.3em] uppercase text-white/20">{group.label}</h3>
+        <div className="space-y-1">
+          {tabs.filter(t => t.group === group.id).map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`w-full flex items-center gap-4 px-4 py-3 rounded-md transition-all duration-300 group ${
+                  isActive 
+                    ? 'bg-orange text-midnight font-bold shadow-[0_4px_20px_rgba(249,115,22,0.3)] translate-x-1' 
+                    : 'text-white/40 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                <Icon size={16} className={isActive ? 'text-midnight' : 'text-orange group-hover:scale-110 transition-transform'} />
+                <span className="text-[10px] tracking-widest uppercase truncate">{tab.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    ))}
+  </nav>
+);
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('overview');
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const tabs = [
     { id: 'overview', label: 'Briefcase Overview', icon: Briefcase, group: 'Intelligence' },
@@ -97,6 +135,35 @@ export default function App() {
   return (
     <div className="flex min-h-screen bg-sand/20 font-sans selection:bg-orange selection:text-white">
       {/* --- SIDEBAR --- */}
+      <AnimatePresence>
+        {isMobileMenuOpen && (
+          <>
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsMobileMenuOpen(false)}
+              className="fixed inset-0 bg-midnight/80 z-[60] lg:hidden backdrop-blur-sm"
+            />
+            <motion.aside 
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className="fixed top-0 left-0 bottom-0 w-[280px] bg-midnight z-[70] lg:hidden flex flex-col shadow-2xl"
+            >
+              <div className="p-8 border-b border-white/5 flex justify-between items-center bg-black/20">
+                <h2 className="text-xl font-serif font-bold text-white tracking-tight">WORLD <span className="text-orange">TRAVELER</span></h2>
+                <button onClick={() => setIsMobileMenuOpen(false)} className="text-white/40 hover:text-white">
+                  <X size={20} />
+                </button>
+              </div>
+              <SidebarContent activeTab={activeTab} setActiveTab={(id) => { setActiveTab(id); setIsMobileMenuOpen(false); }} tabs={tabs} tabGroups={tabGroups} />
+            </motion.aside>
+          </>
+        )}
+      </AnimatePresence>
+
       <aside className="w-72 bg-midnight fixed h-full z-50 flex flex-col hidden lg:flex shadow-2xl border-r border-white/5">
         <div className="p-8 pb-10 border-b border-white/5 bg-black/20">
           <div className="flex items-center gap-3 mb-4">
@@ -108,35 +175,7 @@ export default function App() {
           </h1>
           <p className="text-[8px] tracking-[0.5em] uppercase text-white/30 mt-2 font-medium">Internal Briefcase v2.1</p>
         </div>
-
-        <nav className="flex-1 py-8 px-5 space-y-9 overflow-y-auto custom-scrollbar">
-          {tabGroups.map((group) => (
-            <div key={group.id} className="space-y-4">
-              <h3 className="px-4 text-[9px] font-bold tracking-[0.3em] uppercase text-white/20">{group.label}</h3>
-              <div className="space-y-1">
-                {tabs.filter(t => t.group === group.id).map((tab) => {
-                  const Icon = tab.icon;
-                  const isActive = activeTab === tab.id;
-                  return (
-                    <button
-                      key={tab.id}
-                      onClick={() => setActiveTab(tab.id)}
-                      className={`w-full flex items-center gap-4 px-4 py-3 rounded-md transition-all duration-300 group ${
-                        isActive 
-                          ? 'bg-orange text-midnight font-bold shadow-[0_4px_20px_rgba(249,115,22,0.3)] translate-x-1' 
-                          : 'text-white/40 hover:text-white hover:bg-white/5'
-                      }`}
-                    >
-                      <Icon size={16} className={isActive ? 'text-midnight' : 'text-orange group-hover:scale-110 transition-transform'} />
-                      <span className="text-[10px] tracking-widest uppercase truncate">{tab.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </nav>
-
+        <SidebarContent activeTab={activeTab} setActiveTab={setActiveTab} tabs={tabs} tabGroups={tabGroups} />
         <div className="p-8 border-t border-white/5 bg-black/10">
           <div className="bg-white/5 rounded-lg p-6 space-y-4">
             <div className="flex justify-between items-center text-[10px] tracking-widest uppercase text-white/40">
@@ -157,14 +196,18 @@ export default function App() {
       <main className="flex-1 lg:ml-72 min-h-screen relative overflow-x-hidden">
         {/* Mobile Header */}
         <div className="lg:hidden bg-midnight p-6 flex justify-between items-center sticky top-0 z-50">
-          <h2 className="text-lg font-serif font-bold text-white tracking-tight">WORLD <span className="text-orange">TRAVELER</span></h2>
-          <select 
-            value={activeTab} 
-            onChange={(e) => setActiveTab(e.target.value)}
-            className="bg-white/5 text-orange text-[10px] tracking-widest uppercase border border-orange/30 rounded px-3 py-1.5 outline-none"
-          >
-            {tabs.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-          </select>
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setIsMobileMenuOpen(true)}
+              className="p-2 -ml-2 text-white/40 hover:text-orange"
+            >
+              <Menu size={24} />
+            </button>
+            <h2 className="text-lg font-serif font-bold text-white tracking-tight">WORLD <span className="text-orange">TRAVELER</span></h2>
+          </div>
+          <div className="w-8 h-8 rounded-full bg-orange/10 flex items-center justify-center">
+             <div className="w-1.5 h-1.5 bg-orange rounded-full animate-pulse" />
+          </div>
         </div>
 
         <div className="relative z-10 p-6 md:p-12 lg:p-20">
@@ -411,6 +454,49 @@ export default function App() {
                       Browse Files
                     </div>
                   </motion.button>
+                </div>
+
+                <div className="mt-24 mb-16">
+                  <h4 className="text-[10px] tracking-widest uppercase text-orange font-bold mb-8">Special Purpose Variations</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    {[
+                      { name: "Simplified Icon Mark", desc: "Designed for micro-UI and social avatars where legibility is paramount.", bg: "bg-white", src: logos[0] },
+                      { name: "Stacked Wordmark", desc: "Optimal for narrow vertical spaces and centered layouts.", bg: "bg-midnight", src: logos[1] }
+                    ].map((v, i) => (
+                      <div key={i} className="bg-white border border-midnight/5 shadow-lg group hover:shadow-2xl transition-all overflow-hidden flex flex-col">
+                        <div className="p-6 border-b border-sand flex justify-between items-center group-hover:bg-midnight group-hover:text-white transition-colors">
+                           <span className="text-[10px] font-bold tracking-widest uppercase text-orange">{v.name}</span>
+                           <div className="flex gap-2">
+                              <button className="p-2 bg-sand/50 text-midnight rounded hover:bg-orange hover:text-white transition-all shadow-sm"><Download size={12} /></button>
+                           </div>
+                        </div>
+                        <div className={`aspect-video ${v.bg} flex items-center justify-center p-12 transition-all duration-700 group-hover:p-10 relative`}>
+                           <div className="absolute top-4 left-4 p-2 bg-orange/10 rounded flex items-center gap-2">
+                              <Zap size={10} className="text-orange" />
+                              <span className="text-[8px] font-bold tracking-widest uppercase text-orange">Optimized</span>
+                           </div>
+                           <img 
+                            src={v.src} 
+                            className={`max-h-full max-w-full object-contain ${v.bg === 'bg-midnight' ? 'brightness-0 invert' : 'mix-blend-multiply'}`} 
+                            style={{ filter: v.name.includes("Icon") ? "grayscale(1) contrast(1.2)" : "none" }}
+                           />
+                        </div>
+                        <div className="p-8">
+                           <p className="text-xs text-midnight/50 italic leading-relaxed">{v.desc}</p>
+                           <div className="mt-6 pt-6 border-t border-sand flex gap-4">
+                              <div className="flex items-center gap-2">
+                                <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                                <span className="text-[8px] tracking-widest uppercase text-midnight font-bold">SVG</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                                <span className="text-[8px] tracking-widest uppercase text-midnight font-bold">PNG (Transparent)</span>
+                              </div>
+                           </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
 
                 <div className="mt-20 pt-20 border-t border-midnight/5">
@@ -741,7 +827,7 @@ export default function App() {
                     </a>
                  ))}
               </div>
-              <div className="text-[9px] tracking-widest uppercase text-midnight/20">© 2026 Travel and Tours - GHL Mastery Project / Siddiqui</div>
+              <div className="text-[9px] tracking-widest uppercase text-midnight/20">© 2026 Travel and Tours - GHL Mastery Project / Siddiqui - prepared by Jonnaliza Dy</div>
            </div>
         </footer>
       </main>
