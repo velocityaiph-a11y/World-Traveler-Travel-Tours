@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { doc, getDoc, setDoc, serverTimestamp, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, setDoc, serverTimestamp, onSnapshot, getDocFromServer } from 'firebase/firestore';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { db, auth, loginWithGoogle, logout, handleFirestoreError, OperationType } from './lib/firebase';
 import { 
@@ -150,35 +150,56 @@ export default function App() {
   const [logoSavedStatus, setLogoSavedStatus] = useState<'synced' | 'unsaved' | 'offline' | 'idle'>('idle');
 
   useEffect(() => {
+    // Use onSnapshot for real-time updates
     const brandingDocRef = doc(db, 'branding', 'config');
-    
-    // Use onSnapshot for real-time updates and better retry logic
-    const unsubscribe = onSnapshot(brandingDocRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        if (data.logos && Array.isArray(data.logos)) {
-          console.log("Logos synced from cloud database");
-          const mergedLogos = [...defaultLogos];
-          data.logos.forEach((logo, idx) => {
-            if (logo && idx < mergedLogos.length) mergedLogos[idx] = logo;
-          });
-          setUploadedLogos(mergedLogos);
-          setLogoSavedStatus('synced');
+    let retryCount = 0;
+    const maxRetries = 3;
+    let unsubscribe: () => void;
+
+    const startListener = () => {
+      console.log(`[Firebase] Initializing branding listener (Attempt ${retryCount + 1})...`);
+      unsubscribe = onSnapshot(brandingDocRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          if (data.logos && Array.isArray(data.logos)) {
+            console.log("[Firebase] Branding synced successfully");
+            const mergedLogos = [...defaultLogos];
+            data.logos.forEach((logo, idx) => {
+              if (logo && idx < mergedLogos.length) mergedLogos[idx] = logo;
+            });
+            setUploadedLogos(mergedLogos);
+            setLogoSavedStatus('synced');
+          } else {
+            setLogoSavedStatus('unsaved');
+          }
         } else {
+          console.log("[Firebase] No remote branding config found; using defaults.");
           setLogoSavedStatus('unsaved');
         }
-      } else {
-        setLogoSavedStatus('unsaved');
-      }
-    }, (error) => {
-      // Ignore common noise in logging
-      if (!error.message.toLowerCase().includes('offline') && !error.message.toLowerCase().includes('permission')) {
-        console.warn("Logo sync warning:", error.message);
-      }
-      setLogoSavedStatus('offline');
-    });
+      }, (error) => {
+        console.error("[Firebase] Sync error:", error.message);
+        
+        // Handle Permission Denied with retry (often rule propagation lag)
+        if (error.message.toLowerCase().includes('permission') && retryCount < maxRetries) {
+          retryCount++;
+          console.warn(`[Firebase] Permission denied. Retrying in 5s... (${retryCount}/${maxRetries})`);
+          setTimeout(startListener, 5000);
+          return;
+        }
 
-    return () => unsubscribe();
+        // Structured logging
+        try {
+          handleFirestoreError(error, OperationType.GET, 'branding/config');
+        } catch (err) { }
+        
+        setLogoSavedStatus('offline');
+      });
+    };
+
+    startListener();
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
   }, []);
 
   const compressImage = (base64: string, maxWidth = 400, maxHeight = 400, quality = 0.2): Promise<string> => {
@@ -273,28 +294,29 @@ export default function App() {
       }
     }
     
+    const brandingDocRef = doc(db, 'branding', 'config');
     let totalSize = 0;
     try {
       // Small delay to ensure state is settled
       await new Promise(r => setTimeout(r, 100));
       
       totalSize = uploadedLogos.reduce((acc, logo) => acc + (logo ? logo.length : 0), 0);
-      const maxSize = 600 * 1024; // 600KB limit for reliability
+      // Firestore limit is 1MB, but we'll try to be generous if possible 
+      // or at least give a better error.
+      const maxSize = 1048576; // 1MB exact
 
-      console.log("DB Context:", {
-        projectId: db.app.options.projectId,
-        dbId: (db as any)._databaseId?.database || "default",
-        path: "branding/config"
+      console.log("Persistence Diagnostic:", {
+        path: brandingDocRef.path,
+        size: totalSize,
+        user: currentUser?.email,
+        uid: currentUser?.uid
       });
-      console.log(`Persistence sequence started. Payload size: ${(totalSize / 1024).toFixed(1)} KB`);
 
       if (totalSize > maxSize) {
-        alert(`Logo data is still too large (${(totalSize / 1024).toFixed(0)}KB). Please use simpler or smaller logo files (max 600KB total).`);
+        alert(`Logo data is too large (${(totalSize / 1024).toFixed(0)}KB). Firestore limits individual documents to 1MB. Please use smaller logo files.`);
         setIsSaving(false);
         return;
       }
-
-      const brandingDocRef = doc(db, 'branding', 'config');
       
       const savePromise = setDoc(brandingDocRef, {
         logos: uploadedLogos,
@@ -310,26 +332,50 @@ export default function App() {
       await Promise.race([savePromise, timeoutPromise]);
 
       console.log("Database write confirmed.");
+      // Check if we can read it back to verify sync
+      try {
+        const verifySnap = await getDoc(brandingDocRef);
+        console.log("Post-write verification snap exists:", verifySnap.exists());
+      } catch (e) {
+        console.warn("Could not verify write immediately, but it might have succeeded.");
+      }
+
       setSaveStatus('success');
       setLogoSavedStatus('synced');
       setTimeout(() => setSaveStatus('idle'), 5000);
     } catch (error: any) {
       console.error("Critical storage error:", error);
+      
+      // Use our handleFirestoreError to get structured logs
+      try {
+        handleFirestoreError(error, OperationType.WRITE, 'branding/config');
+      } catch (err) {
+        // This is expected as handleFirestoreError throws
+      }
+
       setSaveStatus('error');
       
       const errorMessage = error.message || String(error);
       const logInfo = {
         msg: errorMessage,
         code: error.code,
-        user: currentUser?.email,
-        payloadSize: (totalSize / 1024).toFixed(1) + " KB"
+        userEmail: currentUser?.email,
+        uid: currentUser?.uid,
+        emailVerified: currentUser?.emailVerified,
+        payloadSize: (totalSize / 1024).toFixed(1) + " KB",
+        dbPath: brandingDocRef?.path || 'branding/config'
       };
-      console.log("Error Diagnostic:", JSON.stringify(logInfo));
+      console.log("Persistence Failure Report:", logInfo);
 
       if (errorMessage.toLowerCase().includes('quota')) {
         alert("Daily database limit reached. Please try again tomorrow.");
       } else if (errorMessage.toLowerCase().includes('permission')) {
-        alert("Permission denied. Ensure you are signed in as velocityaiph@gmail.com. Current: " + (currentUser?.email || 'Not logged in'));
+        alert(`Permission Denied (Firebase).
+        
+Current User: ${currentUser?.email || 'Logged Out'}
+UID: ${currentUser?.uid || 'None'}
+
+Please ensure the database rules allow this UID to write to 'branding/config'. If you just updated rules, wait 30 seconds and try again.`);
       } else if (errorMessage.toLowerCase().includes('timed out')) {
         alert("Network Timeout: The server is not responding fast enough. Try using smaller images.");
       } else {
