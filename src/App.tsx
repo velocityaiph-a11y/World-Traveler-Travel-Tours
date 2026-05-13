@@ -147,58 +147,41 @@ export default function App() {
   }, []);
 
   // Fetch Logos from Firestore
+  const [logoSavedStatus, setLogoSavedStatus] = useState<'synced' | 'unsaved' | 'offline' | 'idle'>('idle');
+
   useEffect(() => {
-    const fetchLogos = async () => {
-      try {
-        console.log("Firestore Debug - Project:", db.app.options.projectId);
-        console.log("Firestore Debug - Database:", (db as any)._databaseId?.database || "default");
-        const brandingDocRef = doc(db, 'branding', 'config');
-        console.log("Attempting to fetch doc:", brandingDocRef.path);
-        const docSnap = await getDoc(brandingDocRef);
-        console.log("Fetch successful. Exists:", docSnap.exists());
-        if (docSnap.exists()) {
-          const data = docSnap.data();
-          if (data.logos && Array.isArray(data.logos)) {
-            const mergedLogos = [...defaultLogos];
-            data.logos.forEach((logo, idx) => {
-              if (logo && idx < mergedLogos.length) mergedLogos[idx] = logo;
-            });
-            setUploadedLogos(mergedLogos);
-          }
-        }
-      } catch (error: any) {
-        console.error("Error fetching logos (getDoc):", error);
-        // Log to diagnostic if it is NOT a known permission issue we are debugging
-        if (!error.message?.includes('permission')) {
-           handleFirestoreError(error, OperationType.GET, 'branding/config');
-        }
-      }
-    };
-
-    fetchLogos();
-
     const brandingDocRef = doc(db, 'branding', 'config');
+    
+    // Use onSnapshot for real-time updates and better retry logic
     const unsubscribe = onSnapshot(brandingDocRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
         if (data.logos && Array.isArray(data.logos)) {
+          console.log("Logos synced from cloud database");
           const mergedLogos = [...defaultLogos];
           data.logos.forEach((logo, idx) => {
-            if (logo) mergedLogos[idx] = logo;
+            if (logo && idx < mergedLogos.length) mergedLogos[idx] = logo;
           });
           setUploadedLogos(mergedLogos);
+          setLogoSavedStatus('synced');
+        } else {
+          setLogoSavedStatus('unsaved');
         }
+      } else {
+        setLogoSavedStatus('unsaved');
       }
     }, (error) => {
-      console.error("Error fetching logos (onSnapshot):", error);
-      if (!error.message?.includes('permission')) {
-        handleFirestoreError(error, OperationType.GET, 'branding/config');
+      // Ignore common noise in logging
+      if (!error.message.toLowerCase().includes('offline') && !error.message.toLowerCase().includes('permission')) {
+        console.warn("Logo sync warning:", error.message);
       }
+      setLogoSavedStatus('offline');
     });
+
     return () => unsubscribe();
   }, []);
 
-  const compressImage = (base64: string, maxWidth = 800, maxHeight = 800, quality = 0.5): Promise<string> => {
+  const compressImage = (base64: string, maxWidth = 400, maxHeight = 400, quality = 0.2): Promise<string> => {
     return new Promise((resolve) => {
       const img = new Image();
       img.src = base64;
@@ -223,13 +206,26 @@ export default function App() {
         canvas.height = height;
         const ctx = canvas.getContext('2d');
         if (ctx) {
-          ctx.fillStyle = 'white'; // Avoid black background for transparent PNGs converted to JPEG
-          ctx.fillRect(0, 0, width, height);
+          // Fill with white first to ensure transparency is handled if converted to jpeg
+          // but we prefer png/webp for logos.
+          ctx.clearRect(0, 0, width, height);
           ctx.drawImage(img, 0, 0, width, height);
         }
-        resolve(canvas.toDataURL('image/jpeg', quality));
+        
+        // Use JPEG for maximum compression if it's over a certain size, 
+        // but logos usually need transparency.
+        // We'll stick to PNG/WebP but at much lower res.
+        try {
+          const webp = canvas.toDataURL('image/webp', quality);
+          if (webp.length > 100) { 
+            resolve(webp);
+            return;
+          }
+        } catch (e) {}
+        
+        resolve(canvas.toDataURL('image/png'));
       };
-      img.onerror = () => resolve(base64); // Fallback
+      img.onerror = () => resolve(base64);
     });
   };
 
@@ -260,68 +256,70 @@ export default function App() {
   };
 
   const saveLogosToFirebase = async () => {
-    console.log("saveLogosToFirebase triggered. User state:", !!user);
+    setIsSaving(true);
+    setSaveStatus('idle');
+    
     let currentUser = user;
     if (!currentUser) {
-      console.log("No user found in state, attempting login...");
       try {
         currentUser = await loginWithGoogle();
         if (!currentUser) {
-          console.warn("Login returned null user");
+          setIsSaving(false);
           return;
         }
       } catch (err) {
-        console.error("Auth failed during save trigger:", err);
+        setIsSaving(false);
         return;
       }
     }
     
-    setIsSaving(true);
-    setSaveStatus('idle');
     try {
-      console.log("Current uploadedLogos count:", uploadedLogos.filter(l => !!l).length);
-      // Calculate total size to stay under 1MB Firestore limit
-      // Base64 strings are large. We need to be careful.
-      const validLogos = uploadedLogos.filter(l => l !== null && l.startsWith('data:'));
+      // Small delay to ensure state is settled
+      await new Promise(r => setTimeout(r, 100));
+      
       const totalSize = uploadedLogos.reduce((acc, logo) => acc + (logo ? logo.length : 0), 0);
-      const maxSize = 750 * 1024; // ~750KB for base64 data to be safe under 1MB document limit
+      const maxSize = 600 * 1024; // 600KB limit for reliability
 
-      console.log(`Attempting to save ${validLogos.length} logos. Total size: ${(totalSize / 1024).toFixed(2)} KB`);
+      console.log(`Persistence sequence started. Payload size: ${(totalSize / 1024).toFixed(1)} KB`);
 
       if (totalSize > maxSize) {
-        console.warn(`Total size too large: ${(totalSize / 1024).toFixed(2)} KB`);
-        alert(`The logos are too large to save. Total size: ${(totalSize / 1024).toFixed(0)}KB. Max allowed: 750KB. Please try using smaller images.`);
+        alert(`Logo data is still too large (${(totalSize / 1024).toFixed(0)}KB). Please use simpler or smaller logo files (max 600KB total).`);
         setIsSaving(false);
         return;
       }
 
       const brandingDocRef = doc(db, 'branding', 'config');
-      console.log("Saving to path:", brandingDocRef.path);
       
-      await setDoc(brandingDocRef, {
+      const savePromise = setDoc(brandingDocRef, {
         logos: uploadedLogos,
         updatedAt: serverTimestamp(),
         updatedBy: currentUser.uid,
-        updatedByEmail: currentUser.email
-      });
+        updatedByEmail: currentUser.email || 'unknown'
+      }, { merge: true });
 
-      console.log("Save successful!");
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("The database operation is taking too long. This may be due to a poor connection or large payload.")), 35000)
+      );
+
+      await Promise.race([savePromise, timeoutPromise]);
+
+      console.log("Database write confirmed.");
       setSaveStatus('success');
+      setLogoSavedStatus('synced');
       setTimeout(() => setSaveStatus('idle'), 5000);
     } catch (error: any) {
-      console.error("Error saving logos details:", error);
+      console.error("Critical storage error:", error);
       setSaveStatus('error');
       
       const errorMessage = error.message || String(error);
-      if (errorMessage.includes('permission')) {
-        console.error("PERMISSION ERROR DETECTED DURING SAVE");
-        try {
-          handleFirestoreError(error, OperationType.WRITE, 'branding/config');
-        } catch (diagError) {
-          // Diagnostic error already logged more info
-        }
+      if (errorMessage.toLowerCase().includes('quota')) {
+        alert("Daily database limit reached. Please try again tomorrow.");
+      } else if (errorMessage.toLowerCase().includes('permission')) {
+        alert("Permission denied. Verify you are logged in as admin.");
+      } else if (errorMessage.toLowerCase().includes('timed out')) {
+        alert("Network Timeout: The server is not responding fast enough. Try using smaller images.");
       } else {
-        alert("Error saving branding assets: " + errorMessage);
+        alert("Error persisting logos: " + errorMessage);
       }
     } finally {
       setIsSaving(false);
@@ -1108,6 +1106,15 @@ export default function App() {
                   subtitle="A sophisticated 4-variant logo system optimized for global brand consistency."
                 />
 
+                <div className="flex justify-center mb-12 -mt-4">
+                  <div className="flex items-center gap-3 px-6 py-2 bg-white shadow-sm rounded-full border border-midnight/5">
+                    <div className={`w-2 h-2 rounded-full ${logoSavedStatus === 'synced' ? 'bg-forest' : logoSavedStatus === 'offline' ? 'bg-red-500' : 'bg-orange'} ${logoSavedStatus !== 'synced' ? 'animate-pulse' : ''}`} />
+                    <span className="text-[10px] font-mono uppercase tracking-[0.2em] font-bold opacity-60">
+                      Sync Status: {logoSavedStatus === 'synced' ? 'Cloud Secure' : logoSavedStatus === 'offline' ? 'Network Restricted' : 'Local Draft (Save Required)'}
+                    </span>
+                  </div>
+                </div>
+
                 <div className="mb-20">
                    <h4 className="text-lg tracking-widest uppercase text-orange font-bold mb-10 italic text-center underline decoration-orange/20 underline-offset-8">Logo Variants & Application Moodboard</h4>
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
@@ -1191,10 +1198,15 @@ export default function App() {
                         <motion.div 
                           initial={{ opacity: 0, y: 10 }}
                           animate={{ opacity: 1, y: 0 }}
-                          className="flex items-center gap-2 text-red-600 font-bold text-sm tracking-widest uppercase bg-red-50 px-4 py-2 rounded-full border border-red-100"
+                          className="flex flex-col items-center gap-2"
                         >
-                          <XCircle size={16} />
-                          <span>Failed to sync branding. Check connection or authority.</span>
+                          <div className="flex items-center gap-2 text-red-600 font-bold text-sm tracking-widest uppercase bg-red-50 px-4 py-2 rounded-full border border-red-100">
+                            <XCircle size={16} />
+                            <span>Failed to sync branding</span>
+                          </div>
+                          <p className="text-[10px] text-red-400 font-mono max-w-xs text-center">
+                            Check console for details or verify database rules.
+                          </p>
                         </motion.div>
                       )}
                    </div>

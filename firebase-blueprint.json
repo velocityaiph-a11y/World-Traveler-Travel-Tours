@@ -17,6 +17,10 @@
         "updatedBy": {
           "type": "string",
           "description": "UID of the user who last updated the branding"
+        },
+        "updatedByEmail": {
+          "type": "string",
+          "description": "Email of the user who last updated the branding"
         }
       },
       "required": ["logos", "updatedAt"]
