@@ -273,13 +273,19 @@ export default function App() {
       }
     }
     
+    let totalSize = 0;
     try {
       // Small delay to ensure state is settled
       await new Promise(r => setTimeout(r, 100));
       
-      const totalSize = uploadedLogos.reduce((acc, logo) => acc + (logo ? logo.length : 0), 0);
+      totalSize = uploadedLogos.reduce((acc, logo) => acc + (logo ? logo.length : 0), 0);
       const maxSize = 600 * 1024; // 600KB limit for reliability
 
+      console.log("DB Context:", {
+        projectId: db.app.options.projectId,
+        dbId: (db as any)._databaseId?.database || "default",
+        path: "branding/config"
+      });
       console.log(`Persistence sequence started. Payload size: ${(totalSize / 1024).toFixed(1)} KB`);
 
       if (totalSize > maxSize) {
@@ -312,14 +318,22 @@ export default function App() {
       setSaveStatus('error');
       
       const errorMessage = error.message || String(error);
+      const logInfo = {
+        msg: errorMessage,
+        code: error.code,
+        user: currentUser?.email,
+        payloadSize: (totalSize / 1024).toFixed(1) + " KB"
+      };
+      console.log("Error Diagnostic:", JSON.stringify(logInfo));
+
       if (errorMessage.toLowerCase().includes('quota')) {
         alert("Daily database limit reached. Please try again tomorrow.");
       } else if (errorMessage.toLowerCase().includes('permission')) {
-        alert("Permission denied. Verify you are logged in as admin.");
+        alert("Permission denied. Ensure you are signed in as velocityaiph@gmail.com. Current: " + (currentUser?.email || 'Not logged in'));
       } else if (errorMessage.toLowerCase().includes('timed out')) {
         alert("Network Timeout: The server is not responding fast enough. Try using smaller images.");
       } else {
-        alert("Error persisting logos: " + errorMessage);
+        alert("Persistence Error: " + errorMessage + "\n\nPlease try again or use smaller files.");
       }
     } finally {
       setIsSaving(false);
