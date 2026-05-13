@@ -1,0 +1,33 @@
+{
+  "entities": {
+    "Branding": {
+      "title": "Branding Configuration",
+      "description": "Global branding assets and settings",
+      "type": "object",
+      "properties": {
+        "logos": {
+          "type": "array",
+          "description": "Array of 4 logo data URLs or references",
+          "items": { "type": "string" }
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "UID of the user who last updated the branding"
+        }
+      },
+      "required": ["logos", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "branding": {
+      "config": {
+        "schema": "Branding",
+        "description": "The global branding configuration document"
+      }
+    }
+  }
+}

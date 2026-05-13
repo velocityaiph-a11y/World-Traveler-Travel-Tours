@@ -1,5 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { doc, getDoc, setDoc, serverTimestamp, onSnapshot } from 'firebase/firestore';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { db, auth, loginWithGoogle, logout, handleFirestoreError, OperationType } from './lib/firebase';
 import { 
   Globe, 
   MapPin, 
@@ -34,7 +37,11 @@ import {
   Download,
   Copy,
   Menu,
-  X
+  X,
+  LogIn,
+  LogOut,
+  Save,
+  Loader2
 } from 'lucide-react';
 
 const logos = [
@@ -116,16 +123,100 @@ const SidebarContent = ({ activeTab, setActiveTab, tabs, tabGroups }: {
 export default function App() {
   const [activeTab, setActiveTab] = useState('welcome');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
 
   const [uploadedLogos, setUploadedLogos] = useState<(string | null)[]>([null, null, null, null]);
+
+  // Auth Listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Fetch Logos from Firestore
+  useEffect(() => {
+    const fetchLogos = async () => {
+      try {
+        console.log("Attempting to fetch branding config from database:", db.app.options.projectId);
+        const brandingDocRef = doc(db, 'branding', 'config');
+        const docSnap = await getDoc(brandingDocRef);
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          if (data.logos) {
+            setUploadedLogos(data.logos);
+          }
+        }
+      } catch (error) {
+        console.error("Error with getDoc:", error);
+      }
+    };
+
+    fetchLogos();
+
+    const brandingDocRef = doc(db, 'branding', 'config');
+    const unsubscribe = onSnapshot(brandingDocRef, (docSnap) => {
+      console.log("Snapshot received for branding/config");
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (data.logos) {
+          setUploadedLogos(data.logos);
+        }
+      }
+    }, (error) => {
+      console.error("Error fetching logos (onSnapshot):", error);
+    });
+    return () => unsubscribe();
+  }, []);
 
   const handleLogoUpload = (index: number, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const url = URL.createObjectURL(file);
-      const newLogos = [...uploadedLogos];
-      newLogos[index] = url;
-      setUploadedLogos(newLogos);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64String = reader.result as string;
+        const newLogos = [...uploadedLogos];
+        newLogos[index] = base64String;
+        setUploadedLogos(newLogos);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const saveLogosToFirebase = async () => {
+    if (!user) {
+      try {
+        await loginWithGoogle();
+        // User is now signed in, the button will be enabled and they can click it again
+        // Or we could let it continue if we had the new user object
+        return;
+      } catch (err) {
+        console.error("Auth failed:", err);
+        return;
+      }
+    }
+    
+    setIsSaving(true);
+    setSaveStatus('idle');
+    try {
+      const brandingDocRef = doc(db, 'branding', 'config');
+      await setDoc(brandingDocRef, {
+        logos: uploadedLogos,
+        updatedAt: serverTimestamp(),
+      });
+      setSaveStatus('success');
+      setTimeout(() => setSaveStatus('idle'), 3000);
+    } catch (error) {
+      console.error("Error saving logos:", error);
+      setSaveStatus('error');
+      handleFirestoreError(error, OperationType.WRITE, 'branding/config');
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -201,6 +292,39 @@ export default function App() {
             WORLD <span className="text-orange">TRAVELER</span>
           </h1>
           <p className="text-sm tracking-[0.4em] uppercase text-white/50 mt-4 font-medium">Internal Briefcase v2.1</p>
+        </div>
+        <div className="px-8 py-4 border-b border-white/5">
+          {isLoading ? (
+            <div className="flex items-center gap-2 text-white/40 text-sm">
+               <Loader2 size={16} className="animate-spin text-orange" />
+               <span>Verifying Authority...</span>
+            </div>
+          ) : user ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-3">
+                <img src={user.photoURL || ""} alt={user.displayName || ""} className="w-8 h-8 rounded-full border border-orange/30" />
+                <div className="flex flex-col">
+                  <span className="text-xs text-white/80 font-bold uppercase tracking-widest truncate max-w-[120px]">{user.displayName}</span>
+                  <span className="text-[10px] text-orange uppercase tracking-widest font-bold font-dm">Authenticated Admin</span>
+                </div>
+              </div>
+              <button 
+                onClick={() => logout()}
+                className="flex items-center gap-2 text-white/40 hover:text-red-400 text-xs uppercase tracking-widest transition-colors mt-2"
+              >
+                <LogOut size={12} />
+                <span>Revoke Access</span>
+              </button>
+            </div>
+          ) : (
+            <button 
+              onClick={() => loginWithGoogle()}
+              className="w-full flex items-center justify-center gap-3 px-4 py-3 bg-white/5 border border-white/10 text-white hover:bg-orange hover:shadow-[0_0_20px_rgba(201,107,44,0.3)] transition-all group"
+            >
+              <LogIn size={16} className="text-orange group-hover:text-white" />
+              <span className="text-xs font-bold uppercase tracking-widest">Admin Auth</span>
+            </button>
+          )}
         </div>
         <SidebarContent activeTab={activeTab} setActiveTab={setActiveTab} tabs={tabs} tabGroups={tabGroups} />
         <div className="p-8 border-t border-white/5 bg-black/10">
@@ -877,7 +1001,7 @@ export default function App() {
                 />
 
                 <div className="mb-20">
-                   <h4 className="text-sm tracking-widest uppercase text-orange font-bold mb-10 italic text-center underline decoration-orange/20 underline-offset-8">Logo Variants & Application Moodboard</h4>
+                   <h4 className="text-lg tracking-widest uppercase text-orange font-bold mb-10 italic text-center underline decoration-orange/20 underline-offset-8">Logo Variants & Application Moodboard</h4>
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
                       {[0, 1, 2, 3].map((index) => (
                         <div key={index} className="relative group">
@@ -899,26 +1023,66 @@ export default function App() {
                                   </div>
                                </div>
                              ) : (
-                               <label className="cursor-pointer flex flex-col items-center gap-4 text-orange group-hover:scale-110 transition-transform">
-                                  <Upload size={48} className="opacity-50" />
-                                  <span className="font-bebas tracking-widest text-xl">Upload Variant 0{index + 1}</span>
+                               <label className="cursor-pointer flex flex-col items-center gap-6 text-orange group-hover:scale-110 transition-transform">
+                                  <Upload size={64} className="opacity-50" />
+                                  <span className="font-bebas tracking-widest text-2xl uppercase">Upload Variant 0{index + 1}</span>
                                   <input type="file" className="hidden" accept="image/*" onChange={(e) => handleLogoUpload(index, e)} />
                                </label>
                              )}
-                             <div className="absolute top-4 left-4 text-sm font-mono opacity-30 uppercase tracking-widest">v.0{index + 1}</div>
+                             <div className="absolute top-6 left-6 text-sm font-mono opacity-50 uppercase tracking-widest font-bold">v.0{index + 1}</div>
                           </div>
-                          <div className="mt-4 text-center">
-                             <span className="text-sm uppercase tracking-widest text-midnight/40 font-bold group-hover:text-orange transition-colors">
+                          <div className="mt-6 text-center">
+                             <span className="text-base uppercase tracking-widest text-midnight/60 font-bold group-hover:text-orange transition-colors">
                                 {index === 0 ? "Primary Badge" : index === 1 ? "High Contrast" : index === 2 ? "Icon Mark" : "Global Lockup"}
                              </span>
                           </div>
                         </div>
                       ))}
                    </div>
+
+                    {/* Save Logos Action */}
+                    <div className="mt-16 flex flex-col items-center gap-6">
+                       <button 
+                         onClick={saveLogosToFirebase}
+                         disabled={isSaving}
+                         className={`group relative flex items-center gap-4 px-12 py-5 bg-midnight text-white text-xl font-bebas tracking-[0.2em] uppercase transition-all duration-500 overflow-hidden shadow-2xl hover:shadow-orange/20 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed`}
+                       >
+                          <div className="relative z-10 flex items-center gap-4">
+                             {isSaving ? (
+                               <Loader2 size={24} className="animate-spin text-orange" />
+                             ) : !user ? (
+                               <LogIn size={24} className="text-orange group-hover:scale-110 transition-transform" />
+                             ) : (
+                               <Save size={24} className="text-orange group-hover:scale-110 transition-transform" />
+                             )}
+                             <span>
+                               {isSaving ? "Persisting Logos..." : !user ? "Admin Auth to Save" : "Save Branding Assets"}
+                             </span>
+                          </div>
+                          <div className="absolute inset-0 bg-orange opacity-0 group-hover:opacity-10 transition-opacity duration-700" />
+                       </button>
+                       
+                       {!user && (
+                         <p className="text-sm font-serif italic text-midnight/40 max-w-md text-center">
+                           Note: You must be authorized as an administrator (<span className="text-orange font-bold">velocityaiph@gmail.com</span>) to persist changes to the global branding system.
+                         </p>
+                       )}
+
+                      {saveStatus === 'success' && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="flex items-center gap-2 text-forest font-bold text-sm tracking-widest uppercase"
+                        >
+                          <CheckCircle2 size={16} />
+                          <span>Branding Successfully Persisted</span>
+                        </motion.div>
+                      )}
+                   </div>
                 </div>
                    <div className="bg-midnight text-white p-12 flex flex-col justify-between">
                       <div>
-                         <h4 className="text-sm tracking-widest uppercase text-orange font-bold mb-8 italic">Design Strategy</h4>
+                         <h4 className="text-base tracking-[0.4em] uppercase text-orange font-bold mb-10 italic border-b border-orange/20 pb-4">Design Strategy</h4>
                          <ul className="space-y-6">
                             {[
                               { t: "Custom Wordmark", d: "Unique typography treatment for 'World Traveller'." },
@@ -984,20 +1148,20 @@ export default function App() {
                   <div className="lg:col-span-1">
                     <div className="bg-white p-8 border border-midnight/5 shadow-sm sticky top-30">
                        <div className="w-24 h-24 bg-sand/30 rounded-full flex items-center justify-center text-4xl mb-6 mx-auto">🧔</div>
-                       <div className="text-center mb-8">
-                          <h3 className="text-2xl font-bebas tracking-widest">Global Explorer</h3>
-                          <p className="text-sm uppercase text-midnight/40 font-bold tracking-widest">Primary Persona</p>
+                       <div className="text-center mb-10">
+                          <h3 className="text-3xl font-bebas tracking-[0.2em] uppercase">Global Explorer</h3>
+                          <p className="text-sm uppercase text-orange font-bold tracking-[0.4em] mt-2">Primary Persona</p>
                        </div>
-                       <div className="space-y-4">
+                       <div className="space-y-6">
                           {[
                             { l: "Age", v: "27 to 42 years old" },
-                            { l: "Location", v: "UAE, Southeast Asia, International" },
-                            { l: "Occupation", v: "Entrepreneurs, Freelancers, OFWs" },
-                            { l: "Income", v: "Middle to Upper Middle" },
-                            { l: "Platforms", v: "IG, YT, TikTok, FB" }
+                            { l: "Location", v: "UAE, SE Asia, Int'l" },
+                            { l: "Occupation", v: "Entrepreneurs, OFWs" },
+                            { l: "Income", v: "Middle to Upper" },
+                            { l: "Platforms", v: "IG, YT, TikTok" }
                           ].map((d, i) => (
-                            <div key={i} className="flex justify-between border-b border-sand/30 pb-2">
-                               <span className="text-sm uppercase tracking-widest text-midnight/30 font-bold">{d.l}</span>
+                            <div key={i} className="flex justify-between border-b border-sand/30 pb-3">
+                               <span className="text-xs uppercase tracking-widest text-midnight/40 font-bold">{d.l}</span>
                                <span className="text-sm uppercase font-bold text-midnight text-right ml-4">{d.v}</span>
                             </div>
                           ))}
@@ -1008,9 +1172,9 @@ export default function App() {
                   <div className="lg:col-span-2 space-y-12">
                      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                         <div className="space-y-8">
-                           <div className="flex items-center gap-3 border-b border-orange/20 pb-4">
-                              <Heart className="text-orange" size={18} />
-                              <h4 className="text-sm tracking-[0.3em] uppercase text-midnight font-bold">Emotional Drivers</h4>
+                           <div className="flex items-center gap-4 border-b border-orange/40 pb-6">
+                              <Heart className="text-orange" size={24} />
+                              <h4 className="text-lg tracking-[0.3em] uppercase text-midnight font-bold font-bebas">Emotional Drivers</h4>
                            </div>
                            <div className="grid grid-cols-1 gap-4">
                               {[
@@ -1033,9 +1197,9 @@ export default function App() {
                         </div>
 
                         <div className="space-y-8">
-                           <div className="flex items-center gap-3 border-b border-orange/20 pb-4">
-                              <Zap className="text-orange" size={18} />
-                              <h4 className="text-sm tracking-[0.3em] uppercase text-midnight font-bold">Buying Triggers</h4>
+                           <div className="flex items-center gap-4 border-b border-orange/40 pb-6">
+                              <Zap className="text-orange" size={24} />
+                              <h4 className="text-lg tracking-[0.3em] uppercase text-midnight font-bold font-bebas">Buying Triggers</h4>
                            </div>
                            <div className="grid grid-cols-1 gap-4">
                               {[
@@ -1084,22 +1248,27 @@ export default function App() {
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 mb-20">
                    <div className="space-y-10">
                       <div>
-                         <h4 className="text-sm tracking-widest uppercase text-orange font-bold mb-6">Main Content Pillars</h4>
-                         <div className="space-y-4">
+                         <h4 className="text-base tracking-[0.4em] uppercase text-orange font-bold mb-10 font-bebas underline decoration-orange/20 underline-offset-8">Main Content Pillars</h4>
+                         <div className="space-y-6">
                             {[
-                              { t: "Travel storytelling (40%)", d: "Authentic, cinematic narratives of global journeys.", w: "w-[40%]" },
-                              { t: "Educational content (30%)", d: "Visas, tips, logistics, and budgeting intelligence.", w: "w-[30%]" },
-                              { t: "Destination visuals (20%)", d: "Cinematic realism and documentary-style immersion.", w: "w-[20%]" },
-                              { t: "Founder insights (10%)", d: "Credibility, personal path, and brand philosophy.", w: "w-[10%]" }
+                              { t: "Travel storytelling (40%)", d: "Authentic, cinematic narratives of global journeys.", w: "0.4" },
+                              { t: "Educational content (30%)", d: "Visas, tips, logistics, and budgeting intelligence.", w: "0.3" },
+                              { t: "Destination visuals (20%)", d: "Cinematic realism and documentary-style immersion.", w: "0.2" },
+                              { t: "Founder insights (10%)", d: "Credibility, personal path, and brand philosophy.", w: "0.1" }
                             ].map((p, i) => (
-                              <div key={i} className="bg-white p-6 border border-midnight/5 shadow-sm">
-                                 <div className="flex justify-between items-center mb-3">
-                                    <span className="text-sm font-bold uppercase tracking-widest">{p.t}</span>
-                                    <div className="h-1 bg-midnight/5 w-24 rounded-full overflow-hidden">
-                                       <div className={`h-full bg-forest ${p.w}`} />
+                              <div key={i} className="bg-white p-8 border border-midnight/10 shadow-lg group hover:border-orange/40 transition-all">
+                                 <div className="flex justify-between items-center mb-5">
+                                    <span className="text-lg font-bebas tracking-widest uppercase text-midnight">{p.t}</span>
+                                    <div className="h-1.5 bg-midnight/5 w-32 rounded-full overflow-hidden">
+                                       <motion.div 
+                                         initial={{ scaleX: 0 }}
+                                         whileInView={{ scaleX: 1 }}
+                                         className="h-full bg-orange origin-left"
+                                         style={{ width: `${parseFloat(p.w) * 100}%` }}
+                                       />
                                     </div>
                                  </div>
-                                 <p className="text-sm text-midnight/50 italic leading-relaxed">{p.d}</p>
+                                 <p className="text-lg text-midnight/70 font-serif italic leading-relaxed">{p.d}</p>
                               </div>
                             ))}
                          </div>
@@ -1245,11 +1414,11 @@ export default function App() {
         </div>
 
         {/* --- GLOBAL FOOTER --- */}
-        <footer className="px-12 py-12 border-t border-midnight/5 text-center md:text-left">
+        <footer className="px-12 py-12 border-t border-midnight/5 text-center md:text-left bg-white/50 backdrop-blur-sm">
            <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-8">
               <div>
-                 <div className="text-lg font-serif font-bold text-midnight mb-1">WORLD <span className="text-orange">TRAVELLER</span></div>
-                 <p className="text-sm tracking-widest uppercase text-midnight/40 leading-relaxed font-medium">Explore with Purpose. Experience Transformation.</p>
+                 <div className="text-lg font-serif font-bold text-midnight mb-1 uppercase tracking-tighter">THE WORLD <span className="text-orange italic">TRAVELER</span> Agency.</div>
+                 <p className="text-xs tracking-[0.4em] uppercase text-midnight/40 leading-relaxed font-bold">Strategic Identity System v2.1 • Siddiqui Portfolio</p>
               </div>
               <div className="flex gap-4">
                  {[
@@ -1264,13 +1433,17 @@ export default function App() {
                       href={social.url} 
                       target="_blank" 
                       rel="noopener noreferrer"
-                      className="w-8 h-8 rounded-full bg-midnight/5 flex items-center justify-center text-midnight/40 hover:bg-orange hover:text-white transition-all"
+                      className="w-10 h-10 rounded-full border border-midnight/5 flex items-center justify-center text-midnight/40 hover:bg-orange hover:text-white hover:border-orange transition-all duration-500 shadow-sm"
                     >
-                      <social.Icon size={14} />
+                      <social.Icon size={16} />
                     </a>
                  ))}
               </div>
-              <div className="text-sm tracking-widest uppercase text-midnight/40">© 2026 Travel and Tours - GHL Mastery Project / Siddiqui - prepared by Jonnaliza Dy</div>
+              <div className="text-[10px] tracking-[0.2em] uppercase text-midnight/30 font-bold max-w-xs text-center md:text-right">
+                Developed for MA Siddiqui <br/> 
+                Design Direction by Jonnaliza Dy <br/>
+                All Rights Reserved © 2026
+              </div>
            </div>
         </footer>
       </main>
