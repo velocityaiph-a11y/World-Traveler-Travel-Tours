@@ -150,21 +150,28 @@ export default function App() {
   useEffect(() => {
     const fetchLogos = async () => {
       try {
+        console.log("Firestore Debug - Project:", db.app.options.projectId);
+        console.log("Firestore Debug - Database:", (db as any)._databaseId?.database || "default");
         const brandingDocRef = doc(db, 'branding', 'config');
+        console.log("Attempting to fetch doc:", brandingDocRef.path);
         const docSnap = await getDoc(brandingDocRef);
+        console.log("Fetch successful. Exists:", docSnap.exists());
         if (docSnap.exists()) {
           const data = docSnap.data();
           if (data.logos && Array.isArray(data.logos)) {
-            // Merge or replace defaults with stored logos
             const mergedLogos = [...defaultLogos];
             data.logos.forEach((logo, idx) => {
-              if (logo) mergedLogos[idx] = logo;
+              if (logo && idx < mergedLogos.length) mergedLogos[idx] = logo;
             });
             setUploadedLogos(mergedLogos);
           }
         }
-      } catch (error) {
+      } catch (error: any) {
         console.error("Error fetching logos (getDoc):", error);
+        // Log to diagnostic if it is NOT a known permission issue we are debugging
+        if (!error.message?.includes('permission')) {
+           handleFirestoreError(error, OperationType.GET, 'branding/config');
+        }
       }
     };
 
@@ -184,33 +191,87 @@ export default function App() {
       }
     }, (error) => {
       console.error("Error fetching logos (onSnapshot):", error);
+      if (!error.message?.includes('permission')) {
+        handleFirestoreError(error, OperationType.GET, 'branding/config');
+      }
     });
     return () => unsubscribe();
   }, []);
 
+  const compressImage = (base64: string, maxWidth = 800, maxHeight = 800, quality = 0.5): Promise<string> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.src = base64;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > maxWidth) {
+            height *= maxWidth / width;
+            width = maxWidth;
+          }
+        } else {
+          if (height > maxHeight) {
+            width *= maxHeight / height;
+            height = maxHeight;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = 'white'; // Avoid black background for transparent PNGs converted to JPEG
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+        }
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => resolve(base64); // Fallback
+    });
+  };
+
   const handleLogoUpload = (index: number, e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      if (file.size > 5 * 1024 * 1024) {
+        alert("File is too large. Please select a file under 5MB.");
+        return;
+      }
       const reader = new FileReader();
-      reader.onloadend = () => {
+      reader.onloadend = async () => {
         const base64String = reader.result as string;
-        const newLogos = [...uploadedLogos];
-        newLogos[index] = base64String;
-        setUploadedLogos(newLogos);
+        try {
+          setIsSaving(true); // Show loader during compression
+          const compressed = await compressImage(base64String);
+          const newLogos = [...uploadedLogos];
+          newLogos[index] = compressed;
+          setUploadedLogos(newLogos);
+        } catch (err) {
+          console.error("Compression failed:", err);
+        } finally {
+          setIsSaving(false);
+        }
       };
       reader.readAsDataURL(file);
     }
   };
 
   const saveLogosToFirebase = async () => {
-    if (!user) {
+    console.log("saveLogosToFirebase triggered. User state:", !!user);
+    let currentUser = user;
+    if (!currentUser) {
+      console.log("No user found in state, attempting login...");
       try {
-        await loginWithGoogle();
-        // User is now signed in, the button will be enabled and they can click it again
-        // Or we could let it continue if we had the new user object
-        return;
+        currentUser = await loginWithGoogle();
+        if (!currentUser) {
+          console.warn("Login returned null user");
+          return;
+        }
       } catch (err) {
-        console.error("Auth failed:", err);
+        console.error("Auth failed during save trigger:", err);
         return;
       }
     }
@@ -218,17 +279,50 @@ export default function App() {
     setIsSaving(true);
     setSaveStatus('idle');
     try {
+      console.log("Current uploadedLogos count:", uploadedLogos.filter(l => !!l).length);
+      // Calculate total size to stay under 1MB Firestore limit
+      // Base64 strings are large. We need to be careful.
+      const validLogos = uploadedLogos.filter(l => l !== null && l.startsWith('data:'));
+      const totalSize = uploadedLogos.reduce((acc, logo) => acc + (logo ? logo.length : 0), 0);
+      const maxSize = 750 * 1024; // ~750KB for base64 data to be safe under 1MB document limit
+
+      console.log(`Attempting to save ${validLogos.length} logos. Total size: ${(totalSize / 1024).toFixed(2)} KB`);
+
+      if (totalSize > maxSize) {
+        console.warn(`Total size too large: ${(totalSize / 1024).toFixed(2)} KB`);
+        alert(`The logos are too large to save. Total size: ${(totalSize / 1024).toFixed(0)}KB. Max allowed: 750KB. Please try using smaller images.`);
+        setIsSaving(false);
+        return;
+      }
+
       const brandingDocRef = doc(db, 'branding', 'config');
+      console.log("Saving to path:", brandingDocRef.path);
+      
       await setDoc(brandingDocRef, {
         logos: uploadedLogos,
         updatedAt: serverTimestamp(),
+        updatedBy: currentUser.uid,
+        updatedByEmail: currentUser.email
       });
+
+      console.log("Save successful!");
       setSaveStatus('success');
-      setTimeout(() => setSaveStatus('idle'), 3000);
-    } catch (error) {
-      console.error("Error saving logos:", error);
+      setTimeout(() => setSaveStatus('idle'), 5000);
+    } catch (error: any) {
+      console.error("Error saving logos details:", error);
       setSaveStatus('error');
-      handleFirestoreError(error, OperationType.WRITE, 'branding/config');
+      
+      const errorMessage = error.message || String(error);
+      if (errorMessage.includes('permission')) {
+        console.error("PERMISSION ERROR DETECTED DURING SAVE");
+        try {
+          handleFirestoreError(error, OperationType.WRITE, 'branding/config');
+        } catch (diagError) {
+          // Diagnostic error already logged more info
+        }
+      } else {
+        alert("Error saving branding assets: " + errorMessage);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -1086,10 +1180,21 @@ export default function App() {
                         <motion.div 
                           initial={{ opacity: 0, y: 10 }}
                           animate={{ opacity: 1, y: 0 }}
-                          className="flex items-center gap-2 text-forest font-bold text-sm tracking-widest uppercase"
+                          className="flex items-center gap-2 text-forest font-bold text-sm tracking-widest uppercase bg-forest/10 px-4 py-2 rounded-full"
                         >
                           <CheckCircle2 size={16} />
                           <span>Branding Successfully Persisted</span>
+                        </motion.div>
+                      )}
+
+                      {saveStatus === 'error' && (
+                        <motion.div 
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="flex items-center gap-2 text-red-600 font-bold text-sm tracking-widest uppercase bg-red-50 px-4 py-2 rounded-full border border-red-100"
+                        >
+                          <XCircle size={16} />
+                          <span>Failed to sync branding. Check connection or authority.</span>
                         </motion.div>
                       )}
                    </div>
