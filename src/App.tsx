@@ -128,7 +128,14 @@ export default function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'success' | 'error'>('idle');
 
-  const [uploadedLogos, setUploadedLogos] = useState<(string | null)[]>([null, null, null, null]);
+  const defaultLogos = [
+    'input_file_0.png',
+    'input_file_1.png',
+    'input_file_2.png',
+    'input_file_3.png'
+  ];
+
+  const [uploadedLogos, setUploadedLogos] = useState<(string | null)[]>(defaultLogos);
 
   // Auth Listener
   useEffect(() => {
@@ -143,17 +150,21 @@ export default function App() {
   useEffect(() => {
     const fetchLogos = async () => {
       try {
-        console.log("Attempting to fetch branding config from database:", db.app.options.projectId);
         const brandingDocRef = doc(db, 'branding', 'config');
         const docSnap = await getDoc(brandingDocRef);
         if (docSnap.exists()) {
           const data = docSnap.data();
-          if (data.logos) {
-            setUploadedLogos(data.logos);
+          if (data.logos && Array.isArray(data.logos)) {
+            // Merge or replace defaults with stored logos
+            const mergedLogos = [...defaultLogos];
+            data.logos.forEach((logo, idx) => {
+              if (logo) mergedLogos[idx] = logo;
+            });
+            setUploadedLogos(mergedLogos);
           }
         }
       } catch (error) {
-        console.error("Error with getDoc:", error);
+        console.error("Error fetching logos (getDoc):", error);
       }
     };
 
@@ -161,11 +172,14 @@ export default function App() {
 
     const brandingDocRef = doc(db, 'branding', 'config');
     const unsubscribe = onSnapshot(brandingDocRef, (docSnap) => {
-      console.log("Snapshot received for branding/config");
       if (docSnap.exists()) {
         const data = docSnap.data();
-        if (data.logos) {
-          setUploadedLogos(data.logos);
+        if (data.logos && Array.isArray(data.logos)) {
+          const mergedLogos = [...defaultLogos];
+          data.logos.forEach((logo, idx) => {
+            if (logo) mergedLogos[idx] = logo;
+          });
+          setUploadedLogos(mergedLogos);
         }
       }
     }, (error) => {
