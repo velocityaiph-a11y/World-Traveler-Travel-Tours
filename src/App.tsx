@@ -150,6 +150,9 @@ export default function App() {
   const [logoSavedStatus, setLogoSavedStatus] = useState<'synced' | 'unsaved' | 'offline' | 'idle'>('idle');
 
   useEffect(() => {
+    // Only start sync once auth is stable
+    if (isLoading) return;
+
     // Use onSnapshot for real-time updates
     const brandingDocRef = doc(db, 'branding', 'config');
     let retryCount = 0;
@@ -157,7 +160,8 @@ export default function App() {
     let unsubscribe: () => void;
 
     const startListener = () => {
-      console.log(`[Firebase] Initializing branding listener (Attempt ${retryCount + 1})...`);
+      const dbId = (db as any)._databaseId?.database || "default";
+      console.log(`[Firebase] Initializing branding listener (DB: ${dbId}, User: ${user?.email || 'Guest'}, Attempt ${retryCount + 1})...`);
       unsubscribe = onSnapshot(brandingDocRef, (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
@@ -180,11 +184,21 @@ export default function App() {
         console.error("[Firebase] Sync error:", error.message);
         
         // Handle Permission Denied with retry (often rule propagation lag)
-        if (error.message.toLowerCase().includes('permission') && retryCount < maxRetries) {
-          retryCount++;
-          console.warn(`[Firebase] Permission denied. Retrying in 5s... (${retryCount}/${maxRetries})`);
-          setTimeout(startListener, 5000);
-          return;
+        if (error.message.toLowerCase().includes('permission')) {
+          console.warn("[Firebase] Permission check failed. Verifying with getDocFromServer...");
+          getDocFromServer(brandingDocRef).then((snap) => {
+             console.log("[Firebase] getDocFromServer succeeded! Permission check passed on server.");
+             // If this works, onSnapshot might just be lagging
+          }).catch((serverError) => {
+             console.error("[Firebase] getDocFromServer also failed:", serverError.message);
+          });
+
+          if (retryCount < maxRetries) {
+            retryCount++;
+            console.warn(`[Firebase] Permission denied. Retrying in 5s... (${retryCount}/${maxRetries})`);
+            setTimeout(startListener, 5000);
+            return;
+          }
         }
 
         // Structured logging
@@ -200,7 +214,7 @@ export default function App() {
     return () => {
       if (unsubscribe) unsubscribe();
     };
-  }, []);
+  }, [isLoading]);
 
   const compressImage = (base64: string, maxWidth = 400, maxHeight = 400, quality = 0.2): Promise<string> => {
     return new Promise((resolve) => {
@@ -1260,13 +1274,7 @@ Please ensure the database rules allow this UID to write to 'branding/config'. I
                           animate={{ opacity: 1, y: 0 }}
                           className="flex flex-col items-center gap-2"
                         >
-                          <div className="flex items-center gap-2 text-red-600 font-bold text-sm tracking-widest uppercase bg-red-50 px-4 py-2 rounded-full border border-red-100">
-                            <XCircle size={16} />
-                            <span>Failed to sync branding</span>
-                          </div>
-                          <p className="text-[10px] text-red-400 font-mono max-w-xs text-center">
-                            Check console for details or verify database rules.
-                          </p>
+                          {/* Sync error message removed per request */}
                         </motion.div>
                       )}
                    </div>
